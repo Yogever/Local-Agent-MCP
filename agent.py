@@ -7,25 +7,43 @@ from dataclasses import dataclass
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-MCP_SERVERS: list[StdioServerParameters] = [
-    StdioServerParameters(
+MCP_SERVERS: dict[str, StdioServerParameters] = {
+    "filesystem": StdioServerParameters(
         command="npx",
         args=[
             "@modelcontextprotocol/server-filesystem",
             r"C:\Users\yogev\OneDrive\Documents\Self Learning\Projects\Local Agent MCP\test_folder",
         ],
     ),
-    StdioServerParameters(
+    "calculator": StdioServerParameters(
         command="python",
         args=["calculator_mcp_server.py"],
     ),
-
-    StdioServerParameters(
+    "coder": StdioServerParameters(
         command="python",
         args=["coder_mcp_server.py"],
-    )
+    ),
+}
 
-]
+
+def get_enabled_servers() -> list[StdioServerParameters]:
+    """Return servers to initialize, filtered by ENABLED_MCPS env var.
+
+    Set ENABLED_MCPS to a comma-separated list of server names (e.g.
+    "filesystem,calculator") to enable only those servers.
+    Omit or leave blank to enable all servers.
+    """
+    raw = os.environ.get("ENABLED_MCPS", "").strip()
+    if not raw:
+        return list(MCP_SERVERS.values())
+    names = [n.strip() for n in raw.split(",") if n.strip()]
+    servers = []
+    for name in names:
+        if name in MCP_SERVERS:
+            servers.append(MCP_SERVERS[name])
+        else:
+            print(f"  [warn] Unknown MCP server in ENABLED_MCPS: {name!r} (known: {list(MCP_SERVERS)})")
+    return servers
 
 
 @dataclass
@@ -93,7 +111,7 @@ async def init_servers(
     tool_to_session: dict[str, ClientSession] = {}
     all_mcp_tools: list = []
 
-    for server_params in MCP_SERVERS:
+    for server_params in get_enabled_servers():
         read, write = await stack.enter_async_context(stdio_client(server_params))
         session: ClientSession = await stack.enter_async_context(
             ClientSession(read, write)

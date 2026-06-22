@@ -22,7 +22,7 @@ def get_client() -> groq.AsyncGroq:
 
 
 class GroqBackend(Backend):
-    def __init__(self, client: groq.AsyncGroq, model: str = MODEL) -> None:
+    def __init__(self, client: groq.AsyncGroq, model: str = DEFAULT_MODEL) -> None:
         self._client = client
         self._model = model
 
@@ -76,13 +76,14 @@ class GroqBackend(Backend):
 
 
 async def main() -> None:
-    backend = GroqBackend(get_client(), model=MODEL)
+    model = os.environ.get("GROQ_MODEL", DEFAULT_MODEL)
+    backend = GroqBackend(get_client(), model=model)
 
     print("Starting MCP servers...")
     async with AsyncExitStack() as stack:
         mcp_tools, tool_to_session = await init_servers(stack)
         tools = backend.build_tools(mcp_tools)
-        print(f"\nGroq CLI ({MODEL}) — type 'exit' or Ctrl+C to quit.\n")
+        print(f"\nGroq CLI ({model}) — type 'exit' or Ctrl+C to quit.\n")
 
         while True:
             try:
