@@ -2,16 +2,24 @@
 """Llama 3.2 3B CLI — local Ollama backend."""
 
 import asyncio
+import sys
 from contextlib import AsyncExitStack
+from datetime import datetime
+from pathlib import Path
 import ollama
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent import init_servers, run_turn
-from ollama_chat import OllamaBackend
+from benchmarking.metrics_logger import MetricsLogger, LOGS_DIR
+from chats.ollama_chat import OllamaBackend
 
 MODEL = "llama3.2:3b"
 
 
 async def main() -> None:
     backend = OllamaBackend(ollama.AsyncClient(), model=MODEL)
+    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger = MetricsLogger(LOGS_DIR / "repl_log.jsonl")
 
     print("Starting MCP servers...")
     async with AsyncExitStack() as stack:
@@ -31,7 +39,12 @@ async def main() -> None:
                 print("Bye.")
                 break
             try:
-                reply = await run_turn(backend, tool_to_session, tools, prompt)
+                reply, metrics = await run_turn(
+                    backend, tool_to_session, tools, prompt,
+                    session_id=session_id,
+                    run_label="repl",
+                )
+                logger.log(metrics)
                 print(f"\nLlama: {reply}\n")
             except Exception as e:
                 print(f"Error: {e}\n")

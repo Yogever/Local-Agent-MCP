@@ -5,13 +5,18 @@ import asyncio
 import os
 import sys
 from contextlib import AsyncExitStack
+from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 import anthropic
-from agent import Backend, ToolCall, init_servers, run_turn
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from agent import Backend, ToolCall, Usage, init_servers, run_turn
+from benchmarking.metrics_logger import MetricsLogger, LOGS_DIR
 
 load_dotenv()
 
-MODEL = "llama3.2:3b"
+MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 4096
 
 
@@ -23,8 +28,17 @@ def get_client() -> anthropic.AsyncAnthropic:
 
 
 class ClaudeBackend(Backend):
-    def __init__(self, client: anthropic.AsyncAnthropic) -> None:
+    def __init__(self, client: anthropic.AsyncAnthropic, model: str = MODEL) -> None:
         self._client = client
+        self._model = model
+
+    @property
+    def backend_name(self) -> str:
+        return "anthropic"
+
+    @property
+    def model_name(self) -> str:
+        return self._model
 
     def build_tools(self, mcp_tools: list) -> list[dict]:
         return [
@@ -41,13 +55,20 @@ class ClaudeBackend(Backend):
 
     async def chat(
         self, messages: list, tools: list[dict]
-    ) -> tuple[list, list[ToolCall], str | None]:
+    ) -> tuple[list, list[ToolCall], str | None, Usage]:
         response = await self._client.messages.create(
-            model=MODEL,
+            model=self._model,
             max_tokens=MAX_TOKENS,
             tools=tools,
             messages=messages,
         )
+
+        usage = Usage(
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            cached_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+        )
+
         updated = messages + [{"role": "assistant", "content": response.content}]
 
         tool_calls = [
@@ -56,10 +77,10 @@ class ClaudeBackend(Backend):
             if b.type == "tool_use"
         ]
         if tool_calls:
-            return updated, tool_calls, None
+            return updated, tool_calls, None, usage
 
         text = next((b.text for b in response.content if b.type == "text"), "")
-        return updated, [], text
+        return updated, [], text, usage
 
     def append_tool_results(
         self, messages: list, results: list[tuple[ToolCall, str]]
@@ -76,13 +97,16 @@ class ClaudeBackend(Backend):
 
 
 async def main() -> None:
-    backend = ClaudeBackend(get_client())
+    model = os.environ.get("ANTHROPIC_MODEL", MODEL)
+    backend = ClaudeBackend(get_client(), model=model)
+    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger = MetricsLogger(LOGS_DIR / "repl_log.jsonl")
 
     print("Starting MCP servers...")
     async with AsyncExitStack() as stack:
         mcp_tools, tool_to_session = await init_servers(stack)
         tools = backend.build_tools(mcp_tools)
-        print(f"\nClaude CLI ({MODEL}) — type 'exit' or Ctrl+C to quit.\n")
+        print(f"\nClaude CLI ({model}) — type 'exit' or Ctrl+C to quit.\n")
 
         while True:
             try:
@@ -96,7 +120,12 @@ async def main() -> None:
                 print("Bye.")
                 break
             try:
-                reply = await run_turn(backend, tool_to_session, tools, prompt)
+                reply, metrics = await run_turn(
+                    backend, tool_to_session, tools, prompt,
+                    session_id=session_id,
+                    run_label="repl",
+                )
+                logger.log(metrics)
                 print(f"\nClaude: {reply}\n")
             except Exception as e:
                 print(f"Error: {e}\n")

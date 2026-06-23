@@ -5,10 +5,15 @@ import asyncio
 import os
 import sys
 from contextlib import AsyncExitStack
+from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from agent import Backend, ToolCall, init_servers, run_turn
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from agent import Backend, ToolCall, Usage, init_servers, run_turn
+from benchmarking.metrics_logger import MetricsLogger, LOGS_DIR
 
 load_dotenv()
 
@@ -23,8 +28,17 @@ def get_client() -> genai.Client:
 
 
 class GeminiBackend(Backend):
-    def __init__(self, client: genai.Client) -> None:
+    def __init__(self, client: genai.Client, model: str = MODEL) -> None:
         self._client = client
+        self._model = model
+
+    @property
+    def backend_name(self) -> str:
+        return "gemini"
+
+    @property
+    def model_name(self) -> str:
+        return self._model
 
     def _schema(self, s: dict) -> types.Schema:
         t = s.get("type", "object").upper()
@@ -58,13 +72,21 @@ class GeminiBackend(Backend):
 
     async def chat(
         self, messages: list, tools: types.Tool
-    ) -> tuple[list, list[ToolCall], str | None]:
+    ) -> tuple[list, list[ToolCall], str | None, Usage]:
         response = self._client.models.generate_content(
-            model=MODEL,
+            model=self._model,
             contents=messages,
             config=types.GenerateContentConfig(tools=[tools]),
         )
         candidate = response.candidates[0]
+
+        um = response.usage_metadata
+        usage = Usage(
+            input_tokens=getattr(um, "prompt_token_count", 0) or 0,
+            output_tokens=getattr(um, "candidates_token_count", 0) or 0,
+            cached_tokens=getattr(um, "cached_content_token_count", 0) or 0,
+        )
+
         updated = messages + [types.Content(role="model", parts=candidate.content.parts)]
 
         fc_parts = [p for p in candidate.content.parts if p.function_call]
@@ -73,8 +95,8 @@ class GeminiBackend(Backend):
                 ToolCall(name=p.function_call.name, args=dict(p.function_call.args))
                 for p in fc_parts
             ]
-            return updated, tool_calls, None
-        return updated, [], response.text
+            return updated, tool_calls, None, usage
+        return updated, [], response.text, usage
 
     def append_tool_results(
         self, messages: list, results: list[tuple[ToolCall, str]]
@@ -91,13 +113,16 @@ class GeminiBackend(Backend):
 
 
 async def main() -> None:
-    backend = GeminiBackend(get_client())
+    model = os.environ.get("GEMINI_MODEL", MODEL)
+    backend = GeminiBackend(get_client(), model=model)
+    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger = MetricsLogger(LOGS_DIR / "repl_log.jsonl")
 
     print("Starting MCP servers...")
     async with AsyncExitStack() as stack:
         mcp_tools, tool_to_session = await init_servers(stack)
         tools = backend.build_tools(mcp_tools)
-        print(f"\nGemini CLI ({MODEL}) — type 'exit' or Ctrl+C to quit.\n")
+        print(f"\nGemini CLI ({model}) — type 'exit' or Ctrl+C to quit.\n")
 
         while True:
             try:
@@ -111,7 +136,12 @@ async def main() -> None:
                 print("Bye.")
                 break
             try:
-                reply = await run_turn(backend, tool_to_session, tools, prompt)
+                reply, metrics = await run_turn(
+                    backend, tool_to_session, tools, prompt,
+                    session_id=session_id,
+                    run_label="repl",
+                )
+                logger.log(metrics)
                 print(f"\nGemini: {reply}\n")
             except Exception as e:
                 print(f"Error: {e}\n")
